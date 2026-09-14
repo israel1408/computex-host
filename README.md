@@ -41,4 +41,4 @@ ComputeX Clearhouse connects creators and AI engineers directly with GPU machine
 You do **not** need advanced Linux or coding knowledge to join the network. Open your Linux terminal and paste this single command:
 
 ```bash
-curl -sSL [https://raw.githubusercontent.com/your-username/computex-host/main/install.sh](https://raw.githubusercontent.com/israel1408/computex-host/main/install.sh) | sudo bash
+curl -sSL https://raw.githubusercontent.com/israel1408/computex-host/main/install.sh

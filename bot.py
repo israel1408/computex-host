@@ -15,7 +15,70 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
   def do_GET(self):
     self.send_response(200)
     self.end_headers()
-    self.wfile.write(b"ComputeX Bot is online!")
+    self.wfile.write(b"ComputeX Bot & Webhook Server Online!")
+
+  def do_POST(self):
+    if self.path == "/whop-webhook":
+      content_length = int(self.headers.get("Content-Length", 0))
+      post_data = self.rfile.read(content_length)
+
+      try:
+        payload = json.loads(post_data.decode("utf-8"))
+        event_type = payload.get("action")
+
+        if event_type == "payment.succeeded":
+          data = payload.get("data", {})
+          custom_fields = data.get("custom_fields", {})
+          discord_id = custom_fields.get("discord_user_id")
+
+          # Extract payment amount (handles dollar or cent formatting)
+          raw_amount = float(
+              data.get("final_amount", data.get("amount", 0))
+          )
+          if raw_amount > 500:
+            raw_amount = raw_amount / 100.0
+
+          amount_paid = round(raw_amount, 2)
+
+          # Match tier pricing to credit amounts
+          tier_name = "Paid"
+          if amount_paid == 14.99:
+            credit_amount = 15.00
+            tier_name = "Starter"
+          elif amount_paid == 39.99:
+            credit_amount = 40.00
+            tier_name = "Pro"
+          elif amount_paid == 149.99:
+            credit_amount = 150.00
+            tier_name = "Studio"
+          else:
+            credit_amount = amount_paid
+
+          if discord_id:
+            discord_id = str(discord_id)
+            if discord_id not in db["users"]:
+              db["users"][discord_id] = {"balance": 0.00, "tier": tier_name}
+
+            db["users"][discord_id]["balance"] += credit_amount
+            db["users"][discord_id]["tier"] = tier_name
+            save_db(db)
+            print(
+                f"💰 Added ${credit_amount} ({tier_name}) credits to User"
+                f" ID: {discord_id}"
+            )
+
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Webhook Processed Successfully")
+
+      except Exception as e:
+        print(f"❌ Webhook Processing Error: {e}")
+        self.send_response(400)
+        self.end_headers()
+        self.wfile.write(b"Invalid Payload")
+    else:
+      self.send_response(404)
+      self.end_headers()
 
 
 def run_health_check():

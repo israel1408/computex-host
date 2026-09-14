@@ -8,7 +8,32 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 # =======================================================
-# 1. RENDER HEALTH CHECK SERVER (Keeps Render Web Service alive)
+# 1. CONFIGURATION & DATABASE SETUP
+# =======================================================
+TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+DATABASE_FILE = "computex_db.json"
+
+
+def load_db():
+  if not os.path.exists(DATABASE_FILE):
+    return {"users": {}, "nodes": {}, "active_sessions": {}}
+  try:
+    with open(DATABASE_FILE, "r") as f:
+      return json.load(f)
+  except Exception as e:
+    print(f"⚠️ Error loading database file: {e}. Starting fresh.")
+    return {"users": {}, "nodes": {}, "active_sessions": {}}
+
+
+def save_db(db_data):
+  with open(DATABASE_FILE, "w") as f:
+    json.dump(db_data, f, indent=4)
+
+
+db = load_db()
+
+# =======================================================
+# 2. RENDER HEALTH CHECK & WEBHOOK SERVER
 # =======================================================
 class HealthCheckHandler(BaseHTTPRequestHandler):
 
@@ -18,132 +43,109 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
     self.wfile.write(b"ComputeX Bot & Webhook Server Online!")
 
   def do_POST(self):
-  clean_path = self.path.split("?")[0].rstrip("/")
-  content_length = int(self.headers.get("Content-Length", 0))
-  post_data = (
-      self.rfile.read(content_length) if content_length > 0 else b"{}"
-  )
+    clean_path = self.path.split("?")[0].rstrip("/")
+    content_length = int(self.headers.get("Content-Length", 0))
+    post_data = self.rfile.read(content_length) if content_length > 0 else b"{}"
 
-  try:
-    payload = json.loads(post_data.decode("utf-8"))
+    try:
+      payload = json.loads(post_data.decode("utf-8"))
 
-    # ---------------------------------------------------
-    # 1. WHOP PAYMENT WEBHOOK
-    # ---------------------------------------------------
-    if clean_path == "/whop-webhook":
-      event_type = payload.get("action")
-      if event_type == "payment.succeeded":
-        data = payload.get("data", {})
-        custom_fields = data.get("custom_fields", {})
-        discord_id = custom_fields.get("discord_user_id")
+      # ---------------------------------------------------
+      # A. WHOP PAYMENT WEBHOOK
+      # ---------------------------------------------------
+      if clean_path == "/whop-webhook":
+        event_type = payload.get("action")
+        if event_type == "payment.succeeded":
+          data = payload.get("data", {})
+          custom_fields = data.get("custom_fields", {})
+          discord_id = custom_fields.get("discord_user_id")
 
-        raw_amount = float(data.get("final_amount", data.get("amount", 0)))
-        if raw_amount > 500:
-          raw_amount = raw_amount / 100.0
-        amount_paid = round(raw_amount, 2)
+          raw_amount = float(data.get("final_amount", data.get("amount", 0)))
+          if raw_amount > 500:
+            raw_amount = raw_amount / 100.0
+          amount_paid = round(raw_amount, 2)
 
-        tier_name = "Paid"
-        if amount_paid == 14.99:
-          credit_amount = 15.00
-          tier_name = "Starter"
-        elif amount_paid == 39.99:
-          credit_amount = 40.00
-          tier_name = "Pro"
-        elif amount_paid == 149.99:
-          credit_amount = 150.00
-          tier_name = "Studio"
-        else:
-          credit_amount = amount_paid
+          tier_name = "Paid"
+          if amount_paid == 14.99:
+            credit_amount = 15.00
+            tier_name = "Starter"
+          elif amount_paid == 39.99:
+            credit_amount = 40.00
+            tier_name = "Pro"
+          elif amount_paid == 149.99:
+            credit_amount = 150.00
+            tier_name = "Studio"
+          else:
+            credit_amount = amount_paid
 
-        if discord_id:
-          discord_id = str(discord_id)
-          if discord_id not in db["users"]:
-            db["users"][discord_id] = {"balance": 0.00, "tier": tier_name}
-          db["users"][discord_id]["balance"] += credit_amount
-          db["users"][discord_id]["tier"] = tier_name
-          save_db(db)
-          print(
-              f"💰 Added ${credit_amount} ({tier_name}) credits to User"
-              f" ID: {discord_id}"
-          )
+          if discord_id:
+            discord_id = str(discord_id)
+            if discord_id not in db["users"]:
+              db["users"][discord_id] = {"balance": 0.00, "tier": tier_name}
 
-      self.send_response(200)
-      self.end_headers()
-      self.wfile.write(b"Webhook Processed Successfully")
-
-    # ---------------------------------------------------
-    # 2. GPU HOST NODE REGISTRATION
-    # ---------------------------------------------------
-    elif clean_path == "/register-node":
-      node_id = payload.get("node_id")
-      gpu_name = payload.get("gpu_name")
-      vram = payload.get("vram")
-      hourly_rate = payload.get("hourly_rate", 0.30)
-      status = payload.get("status", "ONLINE")
-
-      if node_id:
-        db["nodes"][node_id] = {
-            "gpu": gpu_name,
-            "vram": vram,
-            "rate": hourly_rate,
-            "status": status,
-            "mode": "Docker/SSH",
-            "last_ping": time.time(),
-        }
-        save_db(db)
-        print(
-            f"🖥️ Registered new GPU Host Node: {node_id} ({gpu_name},"
-            f" {vram})"
-        )
+            db["users"][discord_id]["balance"] += credit_amount
+            db["users"][discord_id]["tier"] = tier_name
+            save_db(db)
+            print(
+                f"💰 Added ${credit_amount} ({tier_name}) credits to User ID:"
+                f" {discord_id}"
+            )
 
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Node Registered Successfully")
+        self.wfile.write(b"Webhook Processed Successfully")
+
+      # ---------------------------------------------------
+      # B. GPU HOST NODE REGISTRATION
+      # ---------------------------------------------------
+      elif clean_path == "/register-node":
+        node_id = payload.get("node_id")
+        gpu_name = payload.get("gpu_name")
+        vram = payload.get("vram")
+        hourly_rate = payload.get("hourly_rate", 0.30)
+        status = payload.get("status", "ONLINE")
+
+        if node_id:
+          db["nodes"][node_id] = {
+              "gpu": gpu_name,
+              "vram": vram,
+              "rate": hourly_rate,
+              "status": status,
+              "mode": "Docker/SSH",
+              "last_ping": time.time(),
+          }
+          save_db(db)
+          print(
+              f"🖥️ Registered new GPU Host Node: {node_id} ({gpu_name}, {vram})"
+          )
+
+          self.send_response(200)
+          self.end_headers()
+          self.wfile.write(b"Node Registered Successfully")
+        else:
+          self.send_response(400)
+          self.end_headers()
+          self.wfile.write(b"Missing node_id")
+
       else:
-        self.send_response(400)
+        self.send_response(404)
         self.end_headers()
-        self.wfile.write(b"Missing node_id")
+        self.wfile.write(b"Not Found")
 
-    else:
-      self.send_response(404)
+    except Exception as e:
+      print(f"❌ Server Processing Error: {e}")
+      self.send_response(400)
       self.end_headers()
-      self.wfile.write(b"Not Found")
-
-  except Exception as e:
-    print(f"❌ Server Processing Error: {e}")
-    self.send_response(400)
-    self.end_headers()
-    self.wfile.write(b"Invalid Payload")
+      self.wfile.write(b"Invalid Payload")
 
 
 def run_health_check():
-  port = int(os.environ.get("PORT", 8080))
+  port = int(os.getenv("PORT", 8080))
   server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
   server.serve_forever()
 
 
 threading.Thread(target=run_health_check, daemon=True).start()
-
-# =======================================================
-# 2. CONFIGURATION & DATABASE SETUP
-# =======================================================
-TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-DATABASE_FILE = "computex_db.json"
-
-
-def load_db():
-  if not os.path.exists(DATABASE_FILE):
-    return {"users": {}, "nodes": {}, "active_sessions": {}}
-  with open(DATABASE_FILE, "r") as f:
-    return json.load(f)
-
-
-def save_db(db_data):
-  with open(DATABASE_FILE, "w") as f:
-    json.dump(db_data, f, indent=4)
-
-
-db = load_db()
 
 # =======================================================
 # 3. BOT INITIALIZATION
@@ -164,11 +166,12 @@ async def on_ready():
   except Exception as e:
     print(f"❌ Slash command sync error: {e}")
 
-  meter_active_sessions.start()
+  if not meter_active_sessions.is_running():
+    meter_active_sessions.start()
 
 
 # =======================================================
-# 4. SLASH COMMANDS
+# 4. SLASH COMMANDS & UI COMPONENTS
 # =======================================================
 @bot.tree.command(
     name="balance", description="Check your remaining ComputeX credit balance."
@@ -210,12 +213,14 @@ async def nodes(interaction: discord.Interaction):
     )
   else:
     for node_id, data in db["nodes"].items():
-      status_emoji = "🟢" if data["status"] == "ONLINE" else "🔴"
+      status_emoji = "🟢" if data.get("status") == "ONLINE" else "🔴"
       embed.add_field(
           name=f"{status_emoji} Node: {node_id}",
           value=(
-              f"**GPU:** {data['gpu']}\n**VRAM:** {data['vram']}\n**Rate:**"
-              f" ${data['rate']}/hr\n**Mode:** {data['mode']}"
+              f"**GPU:** {data.get('gpu', 'Unknown')}\n"
+              f"**VRAM:** {data.get('vram', 'N/A')}\n"
+              f"**Rate:** ${data.get('rate', 0.30)}/hr\n"
+              f"**Mode:** {data.get('mode', 'Docker/SSH')}"
           ),
           inline=True,
       )
@@ -303,8 +308,8 @@ class TemplateSelect(discord.ui.Select):
       embed.add_field(
           name="Instructions",
           value=(
-              "Click the link to open your ready-to-use AI dashboard in"
-              " your browser."
+              "Click the link to open your ready-to-use AI dashboard in your"
+              " browser."
           ),
           inline=False,
       )
@@ -332,25 +337,24 @@ async def rent_gpu(interaction: discord.Interaction):
   user_id = str(interaction.user.id)
   user_data = db["users"].get(user_id, {"balance": 0.00})
 
-  if user_data["balance"] < 0.50:
+  if user_data.get("balance", 0.00) < 0.50:
     await interaction.response.send_message(
-        "❌ **Insufficient Credits!** You need at least $0.50 in compute"
-        " credits to start a rental. Upgrade your plan on Whop to add"
-        " credits.",
+        "❌ **Insufficient Credits!** You need at least $0.50 in compute credits"
+        " to start a rental. Upgrade your plan on Whop to add credits.",
         ephemeral=True,
     )
     return
 
   available_node = None
   for n_id, n_data in db["nodes"].items():
-    if n_data["status"] == "ONLINE":
+    if n_data.get("status") == "ONLINE":
       available_node = n_id
       break
 
   if not available_node:
     await interaction.response.send_message(
-        "🔴 **No host nodes currently available!** All GPUs are currently"
-        " rented or offline. Please check back shortly.",
+        "🔴 **No host nodes currently available!** All GPUs are currently rented"
+        " or offline. Please check back shortly.",
         ephemeral=True,
     )
     return
@@ -370,7 +374,7 @@ async def stop_rental(interaction: discord.Interaction):
   session_data = None
 
   for s_id, s_data in db["active_sessions"].items():
-    if s_data["user_id"] == user_id:
+    if s_data.get("user_id") == user_id:
       active_session_id = s_id
       session_data = s_data
       break
@@ -396,13 +400,9 @@ async def stop_rental(interaction: discord.Interaction):
       title="🛑 Rental Session Terminated", color=discord.Color.red()
   )
   embed.add_field(
-      name="Duration",
-      value=f"{int(runtime_seconds // 60)} minutes",
-      inline=True,
+      name="Duration", value=f"{int(runtime_seconds // 60)} minutes", inline=True
   )
-  embed.add_field(
-      name="Total Cost", value=f"${total_cost:.4f} USD", inline=True
-  )
+  embed.add_field(name="Total Cost", value=f"${total_cost:.4f} USD", inline=True)
   embed.add_field(
       name="Remaining Balance",
       value=f"${db['users'][user_id]['balance']:.2f} USD",
@@ -418,19 +418,21 @@ async def stop_rental(interaction: discord.Interaction):
 @tasks.loop(seconds=60)
 async def meter_active_sessions():
   sessions_to_kill = []
-  for s_id, s_data in db["active_sessions"].items():
-    user_id = s_data["user_id"]
-    minute_cost = s_data["rate_per_sec"] * 60.0
+  for s_id, s_data in list(db["active_sessions"].items()):
+    user_id = s_data.get("user_id")
+    minute_cost = s_data.get("rate_per_sec", 0.30 / 3600.0) * 60.0
+
     if user_id in db["users"]:
       db["users"][user_id]["balance"] -= minute_cost
       if db["users"][user_id]["balance"] <= 0:
         db["users"][user_id]["balance"] = 0.0
-        sessions_to_kill.append((s_id, user_id, s_data["node_id"]))
+        sessions_to_kill.append((s_id, user_id, s_data.get("node_id")))
 
   for s_id, u_id, n_id in sessions_to_kill:
     if n_id in db["nodes"]:
       db["nodes"][n_id]["status"] = "ONLINE"
-    del db["active_sessions"][s_id]
+    if s_id in db["active_sessions"]:
+      del db["active_sessions"][s_id]
 
   save_db(db)
 
@@ -438,6 +440,7 @@ async def meter_active_sessions():
 if __name__ == "__main__":
   if not TOKEN:
     raise ValueError(
-        "DISCORD_BOT_TOKEN environment variable is missing!"
+        "DISCORD_BOT_TOKEN environment variable is missing! Check Render"
+        " Environment settings."
     )
   bot.run(TOKEN)

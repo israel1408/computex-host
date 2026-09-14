@@ -269,4 +269,5 @@ async def meter_active_sessions():
 # RUN BOT ENGINE
 # =======================================================
 if __name__ == "__main__":
+    print(f"Loaded Token Length: {len(TOKEN) if TOKEN else 'NONE'}")
     bot.run(TOKEN)

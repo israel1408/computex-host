@@ -38,7 +38,7 @@ NODE_ID="node-$(head /dev/urandom | tr -dc a-z0-9 | head -c 6)"
 echo "🆔 Assigned Node ID: $NODE_ID"
 
 # 4. Prompt for Central Bot Endpoint
-RENDER_BOT_URL="https://<your-render-app-name>.onrender.com"
+RENDER_BOT_URL="https://computex-bot.onrender.com"
 
 # 5. Register Node with Central Bot
 echo "🌐 Registering node with ComputeX Clearhouse Network..."

@@ -9,7 +9,8 @@ import requests
 # =======================================================
 # CONFIGURATION & DATABASE SETUP
 # =======================================================
-TOKEN = os.getenv("DISCORD_BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+bot.run(TOKEN)
 DATABASE_FILE = "computex_db.json"
 
 # In-Memory Database Structure with Persistent Disk Sync

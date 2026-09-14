@@ -5,6 +5,8 @@ import json
 import os
 import time
 import requests
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # =======================================================
 # CONFIGURATION & DATABASE SETUP
@@ -13,6 +15,21 @@ TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 bot.run(TOKEN)
 DATABASE_FILE = "computex_db.json"
 
+class HealthCheckHandler(BaseHTTPRequestHandler):
+
+  def do_GET(self):
+    self.send_response(200)
+    self.end_headers()
+    self.wfile.write(b"OK")
+
+
+def run_health_check():
+  port = int(os.getenv("PORT", 8080))
+  server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+  server.serve_forever()
+
+
+threading.Thread(target=run_health_check, daemon=True).start()
 # In-Memory Database Structure with Persistent Disk Sync
 def load_db():
     if not os.path.exists(DATABASE_FILE):

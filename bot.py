@@ -11,7 +11,7 @@ from discord.ext import commands, tasks
 # CONFIGURATION & DATABASE SETUP
 # =======================================================
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-HOST_API_KEY = os.getenv("HOST_API_KEY", "computex-prod-secret-2026")
+HOST_API_KEY = os.getenv("HOST_API_KEY", "computex-host-production-secret-key")
 DATABASE_FILE = "computex_db.json"
 
 

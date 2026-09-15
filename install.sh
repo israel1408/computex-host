@@ -2,7 +2,7 @@
 set -e
 
 RENDER_URL="https://computex-bot.onrender.com"
-HOST_API_KEY="computex-prod-secret-2026"
+HOST_API_KEY="computex-host-production-secret-key"
 
 echo "⚡ Initializing ComputeX Host Deployment..."
 

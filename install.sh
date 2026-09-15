@@ -1,8 +1,15 @@
 #!/bin/bash
 set -e
 
-RENDER_URL="https://computex-bot.onrender.com"
-HOST_API_KEY="computex-host-production-secret-key"
+RENDER_URL="${RENDER_URL:-https://computex-bot.onrender.com}"
+HOST_API_KEY="${HOST_API_KEY:-$1}"
+
+if [ -z "$HOST_API_KEY" ]; then
+    echo "❌ Error: Missing HOST_API_KEY."
+    echo "Usage: HOST_API_KEY=your_key bash install.sh"
+    echo "   OR: bash install.sh your_key"
+    exit 1
+fi
 
 echo "⚡ Initializing ComputeX Host Deployment..."
 
@@ -25,8 +32,6 @@ TMATE_WEB=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')
 NODE_ID="node-$(head /dev/urandom | tr -dc a-z0-9 | head -c 6)"
 
 echo "🔗 Live Tunnel Connection established."
-echo "   SSH: $TMATE_SSH"
-echo "   WEB: $TMATE_WEB"
 
 # 3. Authenticated Registration Request
 PAYLOAD=$(jq -n \

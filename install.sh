@@ -7,7 +7,6 @@ HOST_API_KEY="${HOST_API_KEY:-$1}"
 if [ -z "$HOST_API_KEY" ]; then
     echo "❌ Error: Missing HOST_API_KEY."
     echo "Usage: HOST_API_KEY=your_key bash install.sh"
-    echo "   OR: bash install.sh your_key"
     exit 1
 fi
 
@@ -15,7 +14,7 @@ echo "⚡ Initializing ComputeX Host Deployment..."
 
 # 1. Hardware Detection
 if ! command -v nvidia-smi &> /dev/null; then
-    GPU_NAME="NVIDIA GeForce RTX 4090"
+    GPU_NAME="NVIDIA GeForce RTX 4090 (Simulated)"
     GPU_VRAM="24576 MiB"
 else
     GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -n 1)
@@ -33,14 +32,14 @@ NODE_ID="node-$(head /dev/urandom | tr -dc a-z0-9 | head -c 6)"
 
 echo "🔗 Live Tunnel Connection established."
 
-# 3. Authenticated Registration Request
+# 3. Authenticated Registration Request (Aligned with bot.py schema)
 PAYLOAD=$(jq -n \
   --arg id "$NODE_ID" \
   --arg gpu "$GPU_NAME" \
   --arg vram "$GPU_VRAM" \
   --arg ssh "$TMATE_SSH" \
   --arg web "$TMATE_WEB" \
-  '{node_id: $id, gpu_name: $gpu, vram: $vram, hourly_rate: 0.30, ssh_cmd: $ssh, web_cmd: $web}')
+  '{node_id: $id, gpu_model: $gpu, vram: $vram, price_per_hour: 0.30, ssh_connection: $ssh, web_ui_url: $web}')
 
 HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$RENDER_URL/register-node" \
   -H "Content-Type: application/json" \

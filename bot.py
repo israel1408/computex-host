@@ -24,7 +24,7 @@ rental_lock = asyncio.Lock()
 # --- DATABASE MANAGEMENT ---
 def load_db():
     if not os.path.exists(DATA_FILE):
-        return {"nodes": {}, "users": {}, "rentals": {}, "processed_webhooks": []}
+        return {"nodes": {}, "users": {}, "rentals": {}, "processed_webhooks": [], "config": {}}
     try:
         with open(DATA_FILE, "r") as f:
             data = json.load(f)
@@ -32,9 +32,10 @@ def load_db():
             data.setdefault("nodes", {})
             data.setdefault("users", {})
             data.setdefault("rentals", {})
+            data.setdefault("config", {})
             return data
     except Exception:
-        return {"nodes": {}, "users": {}, "rentals": {}, "processed_webhooks": []}
+        return {"nodes": {}, "users": {}, "rentals": {}, "processed_webhooks": [], "config": {}}
 
 def save_db(data):
     temp_file = f"{DATA_FILE}.tmp"
@@ -157,7 +158,7 @@ intents = discord.Intents.default()
 intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# --- BACKGROUND BILLING & PRUNING WORKER ---
+# --- BACKGROUND BILLING, PRUNING & EMBED UPDATE WORKER ---
 @tasks.loop(seconds=30)
 async def billing_loop():
     async with rental_lock:
@@ -176,7 +177,7 @@ async def billing_loop():
                 except Exception:
                     pass
 
-        # 2. Process per-30-second balance deductions for active rentals
+        # 2. Process 30-second balance deductions for active rentals
         for rental_id, rental in list(db["rentals"].items()):
             user_id = rental["user_id"]
             node_id = rental["node_id"]
@@ -200,6 +201,48 @@ async def billing_loop():
                 if user:
                     await user.send(f"⚠️ **Rental Terminated**: Your session on `{node_id}` was automatically stopped due to zero remaining balance.")
             except Exception:
+                pass
+
+        # 3. Auto-update live status board embed if configured
+        cfg = db.get("config", {})
+        chan_id = cfg.get("status_channel_id")
+        msg_id = cfg.get("status_message_id")
+        
+        if chan_id and msg_id:
+            try:
+                channel = bot.get_channel(chan_id) or await bot.fetch_channel(chan_id)
+                msg = await channel.fetch_message(msg_id)
+                
+                nodes = db.get("nodes", {})
+                active_count = sum(1 for n in nodes.values() if n.get("status") in ("available", "ONLINE"))
+                total_count = len(nodes)
+                
+                embed = discord.Embed(
+                    title="🖥️ ComputeX Clearhouse — Live GPU Network Status",
+                    description=f"Real-time availability of P2P GPU compute nodes.\n**Active Capacity:** `{active_count}/{total_count}` nodes online.",
+                    color=discord.Color.green(),
+                    timestamp=datetime.utcnow()
+                )
+                
+                if not nodes:
+                    embed.add_field(name="Available Nodes", value="No GPU nodes currently registered.", inline=False)
+                else:
+                    for nid, info in nodes.items():
+                        st = info.get("status", "available")
+                        emoji = "🟢" if st in ("available", "ONLINE") else "🔴" if st in ("occupied", "BUSY") else "⚪"
+                        gpu = info.get("gpu_model") or info.get("gpu_name") or "Unknown GPU"
+                        rate = info.get("price_per_hour") or info.get("hourly_rate") or 0.30
+                        vram = info.get("vram", "N/A")
+                        
+                        embed.add_field(
+                            name=f"{emoji} Node `{nid}`",
+                            value=f"• **GPU:** {gpu} ({vram})\n• **Rate:** `${rate:.2f}/hr`\n• **Status:** `{st.upper()}`",
+                            inline=True
+                        )
+                
+                embed.set_footer(text="Auto-updates every 30s • Use /rent_gpu in any channel")
+                await msg.edit(embed=embed)
+            except Exception as e:
                 pass
 
         save_db(db)
@@ -239,6 +282,23 @@ async def nodes_cmd(interaction: discord.Interaction):
         lines.append(f"{status_emoji} **{nid}** | {gpu_name} ({vram}) | `${rate:.2f}/hr` | Status: `{status}`")
     
     await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+@bot.tree.command(name="setup_status_board", description="Initialize persistent status embed in this channel (Admin only)")
+@app_commands.default_permissions(administrator=True)
+async def setup_status_board_cmd(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="🖥️ ComputeX Clearhouse — Live GPU Network Status",
+        description="Initializing real-time status board...",
+        color=discord.Color.blue()
+    )
+    embed.set_footer(text="Auto-updates every 30 seconds")
+    
+    await interaction.response.send_message("✅ Status board deployed successfully in this channel.", ephemeral=True)
+    msg = await interaction.channel.send(embed=embed)
+    
+    db["config"]["status_channel_id"] = interaction.channel_id
+    db["config"]["status_message_id"] = msg.id
+    save_db(db)
 
 @bot.tree.command(name="rent_gpu", description="Rent an available GPU node")
 async def rent_gpu_cmd(interaction: discord.Interaction):

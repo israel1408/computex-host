@@ -1,3 +1,4 @@
-.env
 computex_db.json
+.env
 *.log
+__pycache__/

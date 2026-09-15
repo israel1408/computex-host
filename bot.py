@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -8,10 +9,19 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 # =======================================================
-# CONFIGURATION & DATABASE SETUP
+# CONFIGURATION & ENVIRONMENT VERIFICATION
 # =======================================================
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-HOST_API_KEY = os.getenv("HOST_API_KEY", "computex-host-production-secret-key")
+HOST_API_KEY = os.getenv("HOST_API_KEY")
+
+if not TOKEN:
+  print("❌ ERROR: DISCORD_BOT_TOKEN environment variable is missing.")
+  sys.exit(1)
+
+if not HOST_API_KEY:
+  print("❌ ERROR: HOST_API_KEY environment variable is missing.")
+  sys.exit(1)
+
 DATABASE_FILE = "computex_db.json"
 
 
@@ -51,7 +61,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
     try:
       payload = json.loads(post_data.decode("utf-8"))
 
-      # Whop Billing Webhook (Public)
+      # Whop Billing Webhook
       if clean_path == "/whop-webhook":
         if payload.get("action") == "payment.succeeded":
           data = payload.get("data", {})
@@ -99,12 +109,8 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
                 "gpu": payload.get("gpu_name", "NVIDIA GPU"),
                 "vram": payload.get("vram", "Unknown"),
                 "rate": payload.get("hourly_rate", 0.30),
-                "ssh_cmd": payload.get(
-                    "ssh_cmd", "ssh disabled@tmate.io"
-                ),  # Real tmate SSH
-                "web_cmd": payload.get(
-                    "web_cmd", "https://tmate.io"
-                ),  # Real tmate Web URL
+                "ssh_cmd": payload.get("ssh_cmd", "ssh disabled@tmate.io"),
+                "web_cmd": payload.get("web_cmd", "https://tmate.io"),
                 "status": "ONLINE",
                 "last_ping": time.time(),
             }
@@ -335,7 +341,6 @@ async def stop_rental(interaction: discord.Interaction):
 async def billing_and_heartbeat_loop():
   now = time.time()
 
-  # Deduct active rental balances
   for s_id, s_data in list(db["active_sessions"].items()):
     u_id = s_data["user_id"]
     minute_cost = s_data["rate_per_sec"] * 60.0
@@ -345,7 +350,6 @@ async def billing_and_heartbeat_loop():
         db["nodes"][s_data["node_id"]]["status"] = "ONLINE"
         del db["active_sessions"][s_id]
 
-  # Prune dead nodes (> 120s missing heartbeat)
   for n_id, n_data in db["nodes"].items():
     if (
         now - n_data.get("last_ping", 0) > 120

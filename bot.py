@@ -11,7 +11,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 # --- CONFIGURATION & SECURITY KEYS ---
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 HOST_API_KEY = os.getenv("HOST_API_KEY")  # Key required for nodes to register/heartbeat
 WHOP_WEBHOOK_SECRET = os.getenv("WHOP_WEBHOOK_SECRET")  # Secret from Whop developer console
 DATA_FILE = "/data/database.json"

@@ -11,6 +11,7 @@ from discord.ext import commands, tasks
 # 1. CONFIGURATION & DATABASE SETUP
 # =======================================================
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+HOST_API_KEY = os.getenv("HOST_API_KEY", "computex-secret-host-key-2026")
 DATABASE_FILE = "computex_db.json"
 
 
@@ -51,7 +52,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
       payload = json.loads(post_data.decode("utf-8"))
 
       # ---------------------------------------------------
-      # A. WHOP PAYMENT WEBHOOK
+      # A. WHOP PAYMENT WEBHOOK (Public from Whop)
       # ---------------------------------------------------
       if clean_path == "/whop-webhook":
         event_type = payload.get("action")
@@ -96,36 +97,59 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"Webhook Processed Successfully")
 
       # ---------------------------------------------------
-      # B. GPU HOST NODE REGISTRATION
+      # B. AUTHENTICATED HOST NODE ENDPOINTS
       # ---------------------------------------------------
-      elif clean_path == "/register-node":
+      elif clean_path in ["/register-node", "/heartbeat"]:
+        # Verify Security Header
+        client_key = self.headers.get("X-Host-API-Key")
+        if client_key != HOST_API_KEY:
+          self.send_response(401)
+          self.end_headers()
+          self.wfile.write(b"Unauthorized: Invalid Host API Key")
+          return
+
         node_id = payload.get("node_id")
-        gpu_name = payload.get("gpu_name")
-        vram = payload.get("vram")
-        hourly_rate = payload.get("hourly_rate", 0.30)
-        status = payload.get("status", "ONLINE")
 
-        if node_id:
-          db["nodes"][node_id] = {
-              "gpu": gpu_name,
-              "vram": vram,
-              "rate": hourly_rate,
-              "status": status,
-              "mode": "Docker/SSH",
-              "last_ping": time.time(),
-          }
-          save_db(db)
-          print(
-              f"🖥️ Registered new GPU Host Node: {node_id} ({gpu_name}, {vram})"
-          )
+        if clean_path == "/register-node":
+          gpu_name = payload.get("gpu_name")
+          vram = payload.get("vram")
+          hourly_rate = payload.get("hourly_rate", 0.30)
 
-          self.send_response(200)
-          self.end_headers()
-          self.wfile.write(b"Node Registered Successfully")
-        else:
-          self.send_response(400)
-          self.end_headers()
-          self.wfile.write(b"Missing node_id")
+          if node_id:
+            db["nodes"][node_id] = {
+                "gpu": gpu_name,
+                "vram": vram,
+                "rate": hourly_rate,
+                "status": "ONLINE",
+                "mode": "Docker/SSH",
+                "last_ping": time.time(),
+            }
+            save_db(db)
+            print(
+                f"🖥️ Verified & Registered GPU Host Node: {node_id} ({gpu_name},"
+                f" {vram})"
+            )
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"Node Registered Successfully")
+          else:
+            self.send_response(400)
+            self.end_headers()
+            self.wfile.write(b"Missing node_id")
+
+        elif clean_path == "/heartbeat":
+          if node_id and node_id in db["nodes"]:
+            db["nodes"][node_id]["last_ping"] = time.time()
+            if db["nodes"][node_id]["status"] == "OFFLINE":
+              db["nodes"][node_id]["status"] = "ONLINE"
+            save_db(db)
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"Heartbeat Received")
+          else:
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b"Node Not Found")
 
       else:
         self.send_response(404)
@@ -171,7 +195,7 @@ async def on_ready():
 
 
 # =======================================================
-# 4. SLASH COMMANDS & UI COMPONENTS
+# 4. SLASH COMMANDS
 # =======================================================
 @bot.tree.command(
     name="balance", description="Check your remaining ComputeX credit balance."
@@ -206,21 +230,25 @@ async def nodes(interaction: discord.Interaction):
       title="🖥️ ComputeX Host Network Status", color=discord.Color.green()
   )
 
-  if not db["nodes"]:
+  online_nodes = {
+      k: v for k, v in db["nodes"].items() if v.get("status") != "OFFLINE"
+  }
+
+  if not online_nodes:
     embed.description = (
-        "No host nodes registered yet. Run `install.sh` on a GPU machine to"
-        " register!"
+        "No host nodes currently active. Run `install.sh` on a GPU machine to"
+        " join!"
     )
   else:
-    for node_id, data in db["nodes"].items():
-      status_emoji = "🟢" if data.get("status") == "ONLINE" else "🔴"
+    for node_id, data in online_nodes.items():
+      status_emoji = "🟢" if data.get("status") == "ONLINE" else "🟡"
       embed.add_field(
           name=f"{status_emoji} Node: {node_id}",
           value=(
               f"**GPU:** {data.get('gpu', 'Unknown')}\n"
               f"**VRAM:** {data.get('vram', 'N/A')}\n"
               f"**Rate:** ${data.get('rate', 0.30)}/hr\n"
-              f"**Mode:** {data.get('mode', 'Docker/SSH')}"
+              f"**Status:** {data.get('status')}"
           ),
           inline=True,
       )
@@ -235,26 +263,22 @@ class TemplateSelect(discord.ui.Select):
     options = [
         discord.SelectOption(
             label="🎨 ComfyUI (Hobbyist)",
-            description=(
-                "1-Click WebUI for AI Image Generation (No Code Required)"
-            ),
+            description="1-Click WebUI for AI Image Generation",
             value="comfyui",
         ),
         discord.SelectOption(
-            label="📓 JupyterLab Workspace (Hobbyist/Dev)",
-            description="Interactive Python notebook environment in browser",
+            label="📓 JupyterLab Workspace",
+            description="Interactive Python notebook environment",
             value="jupyter",
         ),
         discord.SelectOption(
             label="🦙 Ollama Local LLM Server",
-            description=(
-                "Pre-configured local AI API endpoint for text generation"
-            ),
+            description="Pre-configured local AI API endpoint",
             value="ollama",
         ),
         discord.SelectOption(
-            label="💻 Raw Reverse SSH Tunnel (Developer)",
-            description="Full root terminal command-line access via tmate",
+            label="💻 Raw Reverse SSH Tunnel",
+            description="Full root terminal command-line access",
             value="ssh",
         ),
     ]
@@ -291,11 +315,6 @@ class TemplateSelect(discord.ui.Select):
           value="`ssh tmate-tunnel-string-placeholder@tmate.io`",
           inline=False,
       )
-      embed.add_field(
-          name="Instructions",
-          value="Paste the SSH command into your Mac/Windows terminal.",
-          inline=False,
-      )
     else:
       embed.add_field(
           name="🌐 1-Click Browser Link",
@@ -305,21 +324,8 @@ class TemplateSelect(discord.ui.Select):
           ),
           inline=False,
       )
-      embed.add_field(
-          name="Instructions",
-          value=(
-              "Click the link to open your ready-to-use AI dashboard in your"
-              " browser."
-          ),
-          inline=False,
-      )
 
-    embed.set_footer(
-        text=(
-            "Use /stop_rental to terminate your session and preserve unused"
-            " credits."
-        )
-    )
+    embed.set_footer(text="Use /stop_rental to terminate your session.")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
@@ -339,8 +345,7 @@ async def rent_gpu(interaction: discord.Interaction):
 
   if user_data.get("balance", 0.00) < 0.50:
     await interaction.response.send_message(
-        "❌ **Insufficient Credits!** You need at least $0.50 in compute credits"
-        " to start a rental. Upgrade your plan on Whop to add credits.",
+        "❌ **Insufficient Credits!** You need at least $0.50 to start a rental.",
         ephemeral=True,
     )
     return
@@ -353,8 +358,8 @@ async def rent_gpu(interaction: discord.Interaction):
 
   if not available_node:
     await interaction.response.send_message(
-        "🔴 **No host nodes currently available!** All GPUs are currently rented"
-        " or offline. Please check back shortly.",
+        "🔴 **No host nodes currently available!** All GPUs are rented or"
+        " offline.",
         ephemeral=True,
     )
     return
@@ -413,10 +418,13 @@ async def stop_rental(interaction: discord.Interaction):
 
 
 # =======================================================
-# 5. BACKGROUND ENGINE & STARTUP
+# 5. BACKGROUND ENGINE (Billing & Heartbeat Monitor)
 # =======================================================
 @tasks.loop(seconds=60)
 async def meter_active_sessions():
+  now = time.time()
+
+  # A. Bill active rental sessions
   sessions_to_kill = []
   for s_id, s_data in list(db["active_sessions"].items()):
     user_id = s_data.get("user_id")
@@ -434,13 +442,16 @@ async def meter_active_sessions():
     if s_id in db["active_sessions"]:
       del db["active_sessions"][s_id]
 
+  # B. Check node heartbeats (Prune hosts inactive for > 120 seconds)
+  for node_id, n_data in db["nodes"].items():
+    last_ping = n_data.get("last_ping", 0)
+    if (now - last_ping > 120) and n_data.get("status") != "RENTED":
+      n_data["status"] = "OFFLINE"
+
   save_db(db)
 
 
 if __name__ == "__main__":
   if not TOKEN:
-    raise ValueError(
-        "DISCORD_BOT_TOKEN environment variable is missing! Check Render"
-        " Environment settings."
-    )
+    raise ValueError("DISCORD_BOT_TOKEN environment variable is missing!")
   bot.run(TOKEN)

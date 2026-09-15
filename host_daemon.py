@@ -1,151 +1,98 @@
-#!/usr/bin/env python3
-import json
-import time
 import os
-import subprocess
+import sys
+import time
 import requests
+import pynvml
 
-CONFIG_PATH = "/opt/computex/config.json"
-MINER_CONTAINER = "computex-fallback-miner"
-RENTER_CONTAINER = "computex-renter-workload"
+CENTRAL_API_URL = os.getenv("CENTRAL_API_URL", "https://api.computex.network/v1/hosts/heartbeat")
+HOST_API_KEY = os.getenv("HOST_API_KEY")
+HEARTBEAT_INTERVAL = int(os.getenv("HEARTBEAT_INTERVAL", "15"))
 
-class HostEngine:
+class HostDaemon:
     def __init__(self):
-        self.config = self.load_config()
-        self.state = "INITIALIZING"
-        self.tunnel_url = None
-
-    def load_config(self):
-        if not os.path.exists(CONFIG_PATH):
-            return {
-                "node_id": "demo-node",
-                "wallet": "0x000",
-                "webhook_url": "",
-                "host_mode": "always_on",
-                "mining_wallet": "demo"
-            }
-        with open(CONFIG_PATH, 'r') as f:
-            return json.load(f)
-
-    def run_cmd(self, cmd):
-        try:
-            return subprocess.check_output(cmd, shell=True).decode('utf-8').strip()
-        except Exception:
-            return ""
-
-    def get_gpu_telemetry(self):
-        try:
-            cmd = "nvidia-smi --query-gpu=gpu_name,temperature.gpu,utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits"
-            output = self.run_cmd(cmd)
-            gpu_name, temp, util, mem_used, mem_total = [x.strip() for x in output.split(',')]
-            return {
-                "name": gpu_name,
-                "temp": int(temp),
-                "util": int(util),
-                "mem_used": int(mem_used),
-                "mem_total": int(mem_total)
-            }
-        except Exception:
-            return {"name": "NVIDIA GPU", "temp": 0, "util": 0, "mem_used": 0, "mem_total": 0}
-
-    # --- WORKLOAD & MINING CONTROLLERS ---
-
-    def start_fallback_miner(self):
-        """Starts background mining container when host is idle."""
-        if self.config.get("host_mode") != "always_on":
-            return
+        if not HOST_API_KEY:
+            print("❌ Error: HOST_API_KEY environment variable is missing.")
+            sys.exit(1)
         
-        # Check if already running
-        running = self.run_cmd(f"docker ps -q -f name={MINER_CONTAINER}")
-        if not running:
-            print("[+] Starting Fallback Crypto Miner (Zero-Idle Mode)...")
-            # Example using lightweight background miner container
-            cmd = f"docker run -d --name {MINER_CONTAINER} --gpus all rigelminer/rigel:latest -a kawpow -o stratum+tcp://kp.unmineable.com:3333 -u RVN:{self.config['mining_wallet']}.{self.config['node_id']} --quiet"
-            self.run_cmd(cmd)
+        pynvml.nvmlInit()
+        self.handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+        self.status = "IDLE"
+        self.is_mining = False
 
-    def stop_fallback_miner(self):
-        """Stops background mining container to free up GPU for renter."""
-        running = self.run_cmd(f"docker ps -q -f name={MINER_CONTAINER}")
-        if running:
-            print("[!] Pausing Fallback Miner for incoming rental job...")
-            self.run_cmd(f"docker stop {MINER_CONTAINER} && docker rm {MINER_CONTAINER}")
+    def get_telemetry(self):
+        temp = pynvml.nvmlDeviceGetTemperature(self.handle, pynvml.NVML_TEMPERATURE_GPU)
+        mem_info = pynvml.nvmlDeviceGetMemoryInfo(self.handle)
+        used_vram_gb = round(mem_info.used / (1024 ** 3), 2)
+        total_vram_gb = round(mem_info.total / (1024 ** 3), 2)
+        utilization = pynvml.nvmlDeviceGetUtilizationRates(self.handle)
 
-    def spawn_reverse_tunnel(self):
-        """Creates a secure reverse SSH tunnel using tmate (no open router ports)."""
-        print("[+] Creating Reverse SSH Tunnel...")
-        self.run_cmd("tmate -S /tmp/tmate.sock new-session -d")
-        time.sleep(2)
-        ssh_cmd = self.run_cmd("tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}'")
-        self.tunnel_url = ssh_cmd
-        return ssh_cmd
+        return {
+            "temperature_c": temp,
+            "gpu_utilization_pct": utilization.gpu,
+            "vram_used_gb": used_vram_gb,
+            "vram_total_gb": total_vram_gb
+        }
 
-    def kill_rent_session(self):
-        """Cleanly stops renter workload and closes SSH tunnel."""
-        print("[!] Terminating Renter Session...")
-        self.run_cmd(f"docker stop {RENTER_CONTAINER} && docker rm {RENTER_CONTAINER}")
-        self.run_cmd("tmate -S /tmp/tmate.sock kill-session")
-        self.tunnel_url = None
-        self.state = "IDLE"
+    def start_fallback_mining(self):
+        if not self.is_mining:
+            print("⛏️ Node is IDLE. Starting background fallback mining...")
+            self.is_mining = True
 
-    # --- TELEMETRY & DISCORD DISPATCH ---
+    def stop_fallback_mining(self):
+        if self.is_mining:
+            print("🛑 Stopping background fallback mining for active rental workload...")
+            self.is_mining = False
 
-    def send_telemetry_ping(self, gpu):
-        webhook = self.config.get("webhook_url")
-        if not webhook:
-            return
-
-        status_color = 65280 if gpu["temp"] < 80 else 16711680
-        mode_label = "24/7 Always-On" if self.config.get("host_mode") == "always_on" else "Flexible / On-Demand"
-
+    def send_heartbeat(self, telemetry):
         payload = {
-            "username": "ComputeX Node Telemetry",
-            "embeds": [{
-                "title": f"Node Status: {self.config['node_id']} ({self.state})",
-                "color": status_color,
-                "fields": [
-                    {"name": "Operating Mode", "value": mode_label, "inline": True},
-                    {"name": "Current State", "value": f"`{self.state}`", "inline": True},
-                    {"name": "GPU Temp", "value": f"{gpu['temp']}°C", "inline": True},
-                    {"name": "GPU Load", "value": f"{gpu['util']}%", "inline": True},
-                    {"name": "VRAM Usage", "value": f"{gpu['mem_used']} / {gpu['mem_total']} MB", "inline": True},
-                    {"name": "Reverse SSH String", "value": f"`{self.tunnel_url or 'None (Not Rented)'}`", "inline": False}
-                ],
-                "footer": {"text": "ComputeX Clearhouse Daemon v2.0"},
-                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            }]
+            "host_api_key": HOST_API_KEY,
+            "status": self.status,
+            "is_mining": self.is_mining,
+            "telemetry": telemetry
         }
         try:
-            requests.post(webhook, json=payload, timeout=5)
+            res = requests.post(CENTRAL_API_URL, json=payload, timeout=5)
+            if res.status_code == 200:
+                data = res.json()
+                remote_status = data.get("assigned_status")
+                if remote_status == "RENTED" and self.status != "RENTED":
+                    self.status = "RENTED"
+                    self.stop_fallback_mining()
+                elif remote_status == "IDLE" and self.status == "RENTED":
+                    self.status = "IDLE"
+                    self.start_fallback_mining()
         except Exception as e:
-            print(f"[-] Webhook error: {e}")
-
-    # --- MAIN STATE ENGINE LOOP ---
+            print(f"⚠️ Heartbeat failed: {e}")
 
     def run(self):
-        print(f"⚡ ComputeX Host Daemon Initialized [{self.config['node_id']}]")
-        self.state = "IDLE"
+        print("🚀 ComputeX Host Daemon started successfully.")
+        self.start_fallback_mining()
 
-        while True:
-            gpu = self.get_gpu_telemetry()
+        try:
+            while True:
+                telemetry = self.get_telemetry()
+                
+                # Thermal Protection Guardrail
+                if telemetry["temperature_c"] > 85:
+                    print(f"🔥 WARNING: High GPU Temperature ({telemetry['temperature_c']}°C)! Throttling node...")
+                    self.status = "THERMAL_THROTTLED"
+                    self.stop_fallback_mining()
+                elif self.status == "THERMAL_THROTTLED" and telemetry["temperature_c"] <= 75:
+                    print("❄️ Temperature normalized. Resuming standard operations...")
+                    self.status = "IDLE"
+                    self.start_fallback_mining()
 
-            # 1. Thermal Emergency Safeguard
-            if gpu["temp"] >= 83:
-                print(f"🚨 THERMAL CRITICAL ({gpu['temp']}°C)! Killing high-load tasks...")
-                self.kill_rent_session()
-                self.stop_fallback_miner()
-                self.state = "THERMAL_COOLDOWN"
-                time.sleep(30)
-                continue
+                print(f"📊 [Telemetry] Temp: {telemetry['temperature_c']}°C | GPU Util: {telemetry['gpu_utilization_pct']}% | VRAM: {telemetry['vram_used_gb']}/{telemetry['vram_total_gb']} GB | Status: {self.status}")
+                
+                self.send_heartbeat(telemetry)
+                time.sleep(HEARTBEAT_INTERVAL)
 
-            # 2. State Controller
-            if self.state == "IDLE":
-                if self.config.get("host_mode") == "always_on":
-                    self.start_fallback_miner()
-            
-            # 3. Telemetry Broadcast
-            self.send_telemetry_ping(gpu)
-            time.sleep(60)
+        except KeyboardInterrupt:
+            print("🛑 Stopping ComputeX Host Daemon...")
+            self.stop_fallback_mining()
+        finally:
+            pynvml.nvmlShutdown()
 
 if __name__ == "__main__":
-    engine = HostEngine()
-    engine.run()
+    daemon = HostDaemon()
+    daemon.run()

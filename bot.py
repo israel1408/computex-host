@@ -4,6 +4,7 @@ import asyncio
 import hmac
 import hashlib
 import base64
+import secrets
 from datetime import datetime
 from aiohttp import web
 import discord
@@ -12,19 +13,19 @@ from discord.ext import commands, tasks
 
 # --- CONFIGURATION & SECURITY KEYS ---
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN") or os.getenv("DISCORD_BOT_TOKEN")
-HOST_API_KEY = os.getenv("HOST_API_KEY")
+HOST_API_KEY = os.getenv("HOST_API_KEY")  # Optional fallback master key
 WHOP_WEBHOOK_SECRET = os.getenv("WHOP_WEBHOOK_SECRET")
 DATA_FILE = "/data/database.json" if os.path.exists("/data") else "database.json"
 
 if not HOST_API_KEY or len(HOST_API_KEY) < 16:
-    print("⚠️ WARNING: HOST_API_KEY is short or missing. Set a secure 16+ character key in production.")
+    print("⚠️ WARNING: Master HOST_API_KEY is short or missing. Dynamic host keys will be generated per host.")
 
 rental_lock = asyncio.Lock()
 
 # --- DATABASE MANAGEMENT ---
 def load_db():
     if not os.path.exists(DATA_FILE):
-        return {"nodes": {}, "users": {}, "rentals": {}, "processed_webhooks": [], "config": {}}
+        return {"nodes": {}, "users": {}, "rentals": {}, "host_keys": {}, "processed_webhooks": [], "config": {}}
     try:
         with open(DATA_FILE, "r") as f:
             data = json.load(f)
@@ -32,10 +33,11 @@ def load_db():
             data.setdefault("nodes", {})
             data.setdefault("users", {})
             data.setdefault("rentals", {})
+            data.setdefault("host_keys", {})
             data.setdefault("config", {})
             return data
     except Exception:
-        return {"nodes": {}, "users": {}, "rentals": {}, "processed_webhooks": [], "config": {}}
+        return {"nodes": {}, "users": {}, "rentals": {}, "host_keys": {}, "processed_webhooks": [], "config": {}}
 
 def save_db(data):
     temp_file = f"{DATA_FILE}.tmp"
@@ -44,6 +46,13 @@ def save_db(data):
     os.replace(temp_file, DATA_FILE)
 
 db = load_db()
+
+def is_valid_host_key(provided_key: str) -> bool:
+    if not provided_key:
+        return False
+    if HOST_API_KEY and hmac.compare_digest(provided_key, HOST_API_KEY):
+        return True
+    return provided_key in db.get("host_keys", {})
 
 # --- WEBHOOK SIGNATURE VERIFICATION ---
 def verify_whop_signature(raw_body: bytes, headers: dict, secret: str) -> bool:
@@ -66,21 +75,27 @@ async def handle_health(request):
     return web.Response(text="ComputeX Control Plane Active", status=200)
 
 async def handle_register_node(request):
-    if request.headers.get("X-Host-API-Key") != HOST_API_KEY:
-        return web.json_response({"error": "Unauthorized key"}, status=401)
+    key = request.headers.get("X-Host-API-Key") or request.headers.get("Authorization", "").replace("Bearer ", "")
     
     try:
         data = await request.json()
-        node_id = data.get("node_id")
+    except Exception:
+        data = {}
+
+    if not key:
+        key = data.get("host_api_key")
+
+    if not is_valid_host_key(key):
+        return web.json_response({"error": "Unauthorized key"}, status=401)
+    
+    try:
+        node_id = data.get("node_id") or f"node_{key[-8:]}"
         price = data.get("price_per_hour") or data.get("hourly_rate") or 0.30
         
-        if not node_id:
-            return web.json_response({"error": "Invalid payload format"}, status=400)
-            
         db["nodes"][node_id] = {
             "node_id": node_id,
             "gpu_model": str(data.get("gpu_model") or data.get("gpu_name") or "Unknown GPU"),
-            "vram": str(data.get("vram", "N/A")),
+            "vram": str(data.get("vram") or data.get("vram_gb") or "N/A"),
             "price_per_hour": float(price),
             "ssh_connection": str(data.get("ssh_connection") or data.get("ssh_cmd") or ""),
             "web_ui_url": str(data.get("web_ui_url") or data.get("web_cmd") or ""),
@@ -93,20 +108,68 @@ async def handle_register_node(request):
     except Exception as e:
         return web.json_response({"error": f"Server error: {str(e)}"}, status=500)
 
-async def handle_heartbeat(request):
-    if request.headers.get("X-Host-API-Key") != HOST_API_KEY:
-        return web.json_response({"error": "Unauthorized"}, status=401)
+async def handle_verify_node(request):
+    """Hardware benchmark verification route for verify_hardware.py"""
     try:
         data = await request.json()
-        node_id = data.get("node_id")
-        if not node_id or node_id not in db["nodes"]:
+        key = data.get("host_api_key") or request.headers.get("X-Host-API-Key")
+        
+        if not is_valid_host_key(key):
+            return web.json_response({"error": "Unauthorized host key"}, status=401)
+
+        gpu_name = data.get("gpu_name", "Unknown GPU")
+        vram_gb = float(data.get("vram_gb", 0))
+        measured_tflops = float(data.get("measured_tflops", 0))
+
+        if vram_gb < 4.0 or measured_tflops < 0.5:
+            return web.json_response({"error": "Hardware failed minimum thresholds"}, status=400)
+
+        assigned_tier = "High Performance" if vram_gb >= 16.0 and measured_tflops >= 15.0 else "Standard"
+        node_id = f"node_{key[-8:]}"
+
+        db["nodes"][node_id] = {
+            "node_id": node_id,
+            "gpu_model": gpu_name,
+            "vram": f"{vram_gb} GB",
+            "price_per_hour": 0.50 if assigned_tier == "High Performance" else 0.30,
+            "measured_tflops": measured_tflops,
+            "tier": assigned_tier,
+            "status": "available",
+            "last_heartbeat": datetime.utcnow().isoformat()
+        }
+        save_db(db)
+        print(f"✅ Hardware Verified for Node: {node_id} [{assigned_tier}]")
+        return web.json_response({
+            "status": "success",
+            "node_id": node_id,
+            "assigned_tier": assigned_tier
+        })
+    except Exception as e:
+        return web.json_response({"error": f"Invalid payload: {str(e)}"}, status=400)
+
+async def handle_heartbeat(request):
+    key = request.headers.get("X-Host-API-Key") or request.headers.get("Authorization", "").replace("Bearer ", "")
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+
+    if not key:
+        key = data.get("host_api_key") or data.get("node_id")
+
+    if not is_valid_host_key(key) and key not in db["nodes"]:
+        return web.json_response({"error": "Unauthorized"}, status=401)
+
+    try:
+        node_id = data.get("node_id") or f"node_{key[-8:]}"
+        if node_id not in db["nodes"]:
             return web.json_response({"error": "Node not found"}, status=404)
 
         db["nodes"][node_id]["last_heartbeat"] = datetime.utcnow().isoformat()
         if db["nodes"][node_id].get("status") == "offline":
             db["nodes"][node_id]["status"] = "available"
         save_db(db)
-        return web.json_response({"status": "alive"}, status=200)
+        return web.json_response({"status": "alive", "assigned_status": db["nodes"][node_id].get("status")}, status=200)
     except Exception:
         return web.json_response({"error": "Invalid payload"}, status=400)
 
@@ -150,7 +213,7 @@ async def handle_whop_webhook(request):
                 print(f"✅ Credited ${amount:.2f} USD to Discord User {discord_id_str}")
 
         return web.json_response({"status": "success"}, status=200)
-    except Exception as e:
+    except Exception:
         return web.json_response({"error": "Malformed payload"}, status=400)
 
 # --- DISCORD BOT SETUP ---
@@ -242,7 +305,7 @@ async def billing_loop():
                 
                 embed.set_footer(text="Auto-updates every 30s • Use /rent_gpu in any channel")
                 await msg.edit(embed=embed)
-            except Exception as e:
+            except Exception:
                 pass
 
         save_db(db)
@@ -259,6 +322,44 @@ async def on_ready():
         billing_loop.start()
 
 # --- SLASH COMMANDS ---
+@bot.tree.command(name="get_host_script", description="Get your private host installation command")
+async def get_host_script_cmd(interaction: discord.Interaction):
+    # Case-insensitive check for '@Verified host' role or Admin rights
+    has_verified_role = any(role.name.strip().lower() == "verified host" for role in interaction.user.roles)
+    
+    if not has_verified_role and not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message(
+            "❌ **Access Denied:** You need the `@Verified host` role to get a host setup script. Open a ticket in `#support` to apply.",
+            ephemeral=True
+        )
+        return
+
+    user_id_str = str(interaction.user.id)
+    
+    # Check if user already has an active host key, otherwise generate a dynamic key
+    user_host_key = None
+    for key, info in db.get("host_keys", {}).items():
+        if info.get("user_id") == user_id_str:
+            user_host_key = key
+            break
+
+    if not user_host_key:
+        user_host_key = f"cx_host_{secrets.token_hex(16)}"
+        db["host_keys"][user_host_key] = {
+            "user_id": user_id_str,
+            "created_at": datetime.utcnow().isoformat()
+        }
+        save_db(db)
+
+    script_cmd = f'HOST_API_KEY="{user_host_key}" bash <(curl -sSL https://raw.githubusercontent.com/israel1408/computex-host/main/install.sh)'
+    
+    await interaction.response.send_message(
+        f"🔒 **Your Private ComputeX Host Installation Command:**\n"
+        f"Paste this command into your GPU host server terminal. Do not share this command publicly.\n\n"
+        f"```bash\n{script_cmd}\n```",
+        ephemeral=True
+    )
+
 @bot.tree.command(name="balance", description="Check your ComputeX account balance")
 async def balance_cmd(interaction: discord.Interaction):
     user_id = str(interaction.user.id)
@@ -392,14 +493,17 @@ async def main():
     app.router.add_get("/", handle_health)
     app.router.add_get("/health", handle_health)
     app.router.add_post("/register-node", handle_register_node)
+    app.router.add_post("/v1/hosts/verify", handle_verify_node)
     app.router.add_post("/heartbeat", handle_heartbeat)
+    app.router.add_post("/v1/hosts/heartbeat", handle_heartbeat)
     app.router.add_post("/whop-webhook", handle_whop_webhook)
 
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", 8080)))
+    port = int(os.getenv("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    print(f"🌐 HTTP Control Plane Server running on port {os.getenv('PORT', 8080)}")
+    print(f"🌐 HTTP Control Plane Server running on port {port}")
 
     await bot.start(DISCORD_TOKEN)
 
